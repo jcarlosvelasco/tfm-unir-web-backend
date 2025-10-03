@@ -149,7 +149,6 @@ def train_model():
     model.fit_PINN(
         num_epochs=10000,
         print_every=100,
-        save_path='model/weights/best_model.weights.h5',
         patience = 350
     )
 

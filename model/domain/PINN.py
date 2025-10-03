@@ -1,9 +1,5 @@
 import tensorflow as tf
 from keras import layers
-import numpy as np
-import json
-import os
-from pathlib import Path
 
 from model.helpers import potencia_lente_correctora, potencia_superficie
 
@@ -152,45 +148,13 @@ class PINN_model(tf.keras.Model):
         loss_val = self.total_loss(l_data_val, l_physics_val)
         return loss_val, l_data_val, l_physics_val
 
-    def save_normalization_params(self, save_dir):
-        """
-        Guarda los parámetros de normalización en formato JSON y NumPy
-        """
-        save_dir = Path(save_dir)
-        save_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Guardar en formato NumPy (más eficiente)
-        np.savez(
-            save_dir / 'normalization_params.npz',
-            X_mean=self.X_mean.numpy(),
-            X_std=self.X_std.numpy(),
-            y_mean=self.y_mean.numpy(),
-            y_std=self.y_std.numpy()
-        )
-        
-        # Guardar también en JSON (legible por humanos)
-        norm_params = {
-            'X_mean': self.X_mean.numpy().tolist(),
-            'X_std': self.X_std.numpy().tolist(),
-            'y_mean': self.y_mean.numpy().tolist(),
-            'y_std': self.y_std.numpy().tolist(),
-            'input_dim': int(self.input_dim),
-            'output_dim': int(self.output_dim)
-        }
-        
-        with open(save_dir / 'normalization_params.json', 'w') as f:
-            json.dump(norm_params, f, indent=2)
-
-    def fit_PINN(self, num_epochs, print_every=100, save_path='best_model.weights.h5', patience=100):
+    def fit_PINN(self, num_epochs, print_every=100, patience=100):
         """Entrenamiento del modelo con guardado automático de parámetros de normalización"""
         best_val_loss = float('inf')
         best_epoch = 0
         epochs_without_improvement = 0
+        best_weights = None
         
-        # Crear directorio de guardado
-        save_dir = Path(save_path).parent
-        save_dir.mkdir(parents=True, exist_ok=True)
-
         history = {
             'train_total': [],
             'val_total': [],
@@ -219,9 +183,7 @@ class PINN_model(tf.keras.Model):
             if loss_val.numpy() < best_val_loss:
                 best_val_loss = loss_val.numpy()
                 best_epoch = epoch + 1
-                self.save_weights(save_path)
-                # Guardar parámetros de normalización junto con los mejores pesos
-                self.save_normalization_params(save_dir)
+                best_weights = self.get_weights()
                 epochs_without_improvement = 0
             else:
                 epochs_without_improvement += 1
@@ -233,123 +195,11 @@ class PINN_model(tf.keras.Model):
                 print(f"Early stopping en la época {epoch+1} (no mejora en {patience} épocas).")
                 break
 
+        if best_weights is not None:
+            print(f"Cargando los mejores pesos de la época {best_epoch} con pérdida de validación: {best_val_loss:.4f}")
+            self.set_weights(best_weights)
+
         print(f"Entrenamiento finalizado. Mejor modelo en época {best_epoch} con pérdida de validación: {best_val_loss:.4f}")
-        self.load_weights(save_path)
         self.history = history
 
         return history
-    
-    @classmethod
-    def load_normalization_params(cls, save_dir):
-        """
-        Carga los parámetros de normalización guardados
-        """
-        save_dir = Path(save_dir)
-        
-        # Intentar cargar desde NumPy primero (más eficiente)
-        npz_path = save_dir / 'normalization_params.npz'
-        if npz_path.exists():
-            data = np.load(npz_path)
-            return {
-                'X_mean': data['X_mean'],
-                'X_std': data['X_std'],
-                'y_mean': data['y_mean'],
-                'y_std': data['y_std']
-            }
-        
-        # Fallback a JSON
-        json_path = save_dir / 'normalization_params.json'
-        if json_path.exists():
-            with open(json_path, 'r') as f:
-                data = json.load(f)
-            return {
-                'X_mean': np.array(data['X_mean'], dtype=np.float32),
-                'X_std': np.array(data['X_std'], dtype=np.float32),
-                'y_mean': np.array(data['y_mean'], dtype=np.float32),
-                'y_std': np.array(data['y_std'], dtype=np.float32)
-            }
-        
-        raise FileNotFoundError(f"No se encontraron parámetros de normalización en {save_dir}")
-
-    @classmethod
-    def load_for_inference(cls, parametros, weights_path, normalization_path=None):
-        """
-        Crea una instancia del modelo optimizada para inferencia con parámetros de normalización correctos.
-        
-        Args:
-            parametros: Parámetros del modelo físico
-            weights_path: Ruta a los pesos del modelo
-            normalization_path: Ruta al directorio con parámetros de normalización (por defecto, mismo directorio que weights)
-        """
-        weights_path = Path(weights_path)
-        
-        if normalization_path is None:
-            normalization_path = weights_path.parent
-        else:
-            normalization_path = Path(normalization_path)
-        
-        # Cargar parámetros de normalización
-        try:
-            norm_params = cls.load_normalization_params(normalization_path)
-        except FileNotFoundError as e:
-            raise ValueError(f"No se pudieron cargar los parámetros de normalización: {e}")
-        
-        # Determinar dimensiones desde los parámetros de normalización
-        input_dim = len(norm_params['X_mean'])
-        output_dim = len(norm_params['y_mean'])
-        
-        # Crear arrays dummy para inicialización (solo para compatibilidad)
-        dummy_X = np.zeros((2, input_dim), dtype=np.float32)  # Mínimo 2 muestras para std
-        dummy_y = np.zeros((2, output_dim), dtype=np.float32)
-        
-        # Crear instancia del modelo
-        model = cls(parametros, dummy_X, dummy_X, dummy_y, dummy_y)
-        
-        # Reemplazar parámetros de normalización con los valores correctos
-        model.X_mean = tf.constant(norm_params['X_mean'], dtype=tf.float32)
-        model.X_std = tf.constant(norm_params['X_std'], dtype=tf.float32)
-        model.y_mean = tf.constant(norm_params['y_mean'], dtype=tf.float32)
-        model.y_std = tf.constant(norm_params['y_std'], dtype=tf.float32)
-        
-        # Construir y cargar pesos
-        model.build((None, input_dim))
-        model.load_weights(weights_path)
-        
-        # Hacer una predicción dummy para asegurar inicialización completa
-        dummy_input = np.random.random((1, input_dim)).astype(np.float32)
-        _ = model.predict_deterministic(dummy_input)
-        
-        return model
-
-    def predict_deterministic(self, x):
-        """
-        Método de predicción determinista que garantiza resultados consistentes.
-        
-        Args:
-            x: Input data con shape (batch_size, input_dim)
-        
-        Returns:
-            Predicciones desnormalizadas con shape (batch_size, output_dim)
-        """
-        # Asegurar que la entrada sea un tensor float32
-        if not isinstance(x, tf.Tensor):
-            x = tf.constant(x, dtype=tf.float32)
-        else:
-            x = tf.cast(x, tf.float32)
-        
-        # Normalizar la entrada
-        x_norm = (x - self.X_mean) / self.X_std
-        
-        # Hacer predicción en modo inferencia (training=False para desactivar dropout)
-        y_pred_norm = self(x_norm, training=False)
-        
-        # Desnormalizar la salida
-        y_pred = y_pred_norm * self.y_std + self.y_mean
-        
-        return y_pred
-
-    def predict(self, x, **kwargs):
-        """
-        Override del método predict de Keras para usar nuestro método determinista
-        """
-        return self.predict_deterministic(x).numpy()
