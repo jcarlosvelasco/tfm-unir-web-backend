@@ -2,6 +2,6 @@ venv
 model/domain/__pycache__
 model/__pycache__
 __pycache__
-model/weights/best_model.weights.h5
-model/weights/normalization_stats.json
+# model/weights/best_model.weights.h5
+# model/weights/normalization_stats.json
 model/domain/Base Datos Pacientes.xlsx
